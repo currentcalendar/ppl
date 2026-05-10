@@ -9,7 +9,8 @@ class CorsMiddleware(MiddlewareMixin):
         "https://current-web-pre.onrender.com",
         "https://staging.currentcalendar.es",
         "https://testers.currentcalendar.es",
-        "https://ppl.currentcalendar.es"
+        "https://ppl.currentcalendar.es",
+        "https://api-ppl.currentcalendar.es"
     }
 
     def process_request(self, request):
@@ -22,9 +23,13 @@ class CorsMiddleware(MiddlewareMixin):
         return self._add_cors_headers(request, response)
 
     def _add_cors_headers(self, request, response):
-        origin = request.headers.get("Origin")
+        origin = request.headers.get("Origin") or request.META.get("HTTP_ORIGIN")
 
-        if origin in self.allowed_origins:
+        if origin and (origin in self.allowed_origins or origin.startswith("http://localhost")):
+            response["Access-Control-Allow-Origin"] = origin
+            response["Access-Control-Allow-Credentials"] = "true"
+            response["Vary"] = "Origin"
+        elif origin:
             response["Access-Control-Allow-Origin"] = origin
             response["Access-Control-Allow-Credentials"] = "true"
             response["Vary"] = "Origin"
@@ -32,7 +37,7 @@ class CorsMiddleware(MiddlewareMixin):
             response["Access-Control-Allow-Origin"] = "*"
 
         response["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-        response["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, X-CSRFToken"
+        response["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, X-CSRFToken, accept, origin, json"
         response["Access-Control-Max-Age"] = "86400"
         
         return response
