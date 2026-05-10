@@ -1,0 +1,982 @@
+import {
+    View,
+    Text,
+    TextInput,
+    FlatList,
+    StyleSheet,
+    Image,
+    Pressable,
+    TouchableOpacity,
+    Modal,
+} from "react-native";
+import { useState, useMemo, useEffect } from "react";
+import { Ionicons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
+import { useUserSearch, useCalendarSearch, useEventSearch, useFollowUserAction } from '@/hooks/use-search';
+import { useAuth } from '@/hooks/use-auth';
+import { PublicEventDetailModal } from '@/components/public-event-detail-modal';
+import { CalendarEvent } from '@/types/calendar';
+import { AdCard } from '@/components/ads/ad-card';
+import { injectAds, isAdItem } from '@/components/ads/inject-ads';
+import { useAdsConfig } from '@/hooks/use-ads-config';
+import { useSearchHistory } from '@/hooks/use-search-history';
+import apiClient from '@/services/api-client';
+
+const USE_MOCK = false;
+
+type TabType = 'all' | 'calendars' | 'events' | 'users';
+
+type TabOption = {
+    type: TabType;
+    label: string;
+    icon: React.ComponentProps<typeof Ionicons>['name'];
+};
+
+const TAB_OPTIONS: TabOption[] = [
+    { type: 'all', label: 'All', icon: 'grid-outline' },
+    { type: 'calendars', label: 'Calendars', icon: 'calendar-outline' },
+    { type: 'events', label: 'Events', icon: 'flag-outline' },
+    { type: 'users', label: 'Users', icon: 'people-outline' },
+];
+
+type CategoryItem = {
+    id: number;
+    name: string;
+};
+
+type EventTagItem = {
+    id: number;
+    name: string;
+    category: number;
+    category_name?: string;
+};
+
+type SearchResult =
+    | { type: 'user'; data: any }
+    | { type: 'calendar'; data: any }
+    | { type: 'event'; data: any };
+
+function normalizeText(value: unknown): string {
+    return String(value ?? "").trim();
+}
+
+function getMatchIndex(text: string, term: string): number {
+    if (!text || !term) return -1;
+    return text.toLowerCase().indexOf(term.toLowerCase());
+}
+
+function buildDescriptionSnippet(description: string, term: string, maxLength = 100): string {
+    const raw = normalizeText(description);
+    const query = normalizeText(term);
+    if (!raw) return "";
+    if (!query) return raw.length > maxLength ? `${raw.slice(0, maxLength).trim()}...` : raw;
+
+    const matchIndex = getMatchIndex(raw, query);
+    if (matchIndex < 0) {
+        return raw.length > maxLength ? `${raw.slice(0, maxLength).trim()}...` : raw;
+    }
+
+    const contextSize = Math.max(20, Math.floor((maxLength - query.length) / 2));
+    const start = Math.max(0, matchIndex - contextSize);
+    const end = Math.min(raw.length, matchIndex + query.length + contextSize);
+    const prefix = start > 0 ? "..." : "";
+    const suffix = end < raw.length ? "..." : "";
+
+    return `${prefix}${raw.slice(start, end).trim()}${suffix}`;
+}
+
+function renderHighlightedText(text: string, query: string, baseStyle: any, highlightStyle: any) {
+    const source = normalizeText(text);
+    const term = normalizeText(query);
+
+    if (!source) return <Text style={baseStyle} />;
+    if (!term) return <Text style={baseStyle}>{source}</Text>;
+
+    const regex = new RegExp(`(${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "ig");
+    const parts = source.split(regex);
+
+    return (
+        <Text style={baseStyle}>
+            {parts.map((part, index) => {
+                const isMatch = part.toLowerCase() === term.toLowerCase();
+                return (
+                    <Text key={`${part}-${index}`} style={isMatch ? highlightStyle : undefined}>
+                        {part}
+                    </Text>
+                );
+            })}
+        </Text>
+    );
+}
+
+export default function SearchScreen() {
+    const { user: currentUser } = useAuth();
+    const [query, setQuery] = useState("");
+    const [activeTab, setActiveTab] = useState<TabType>('all');
+    const router = useRouter();
+    const [loadingId, setLoadingId] = useState<string | null>(null);
+    const [users, setUsers] = useState<any[]>([]);
+    const [activeEvent, setActiveEvent] = useState<CalendarEvent | null>(null);
+
+    const [categories, setCategories] = useState<CategoryItem[]>([]);
+    const [eventTags, setEventTags] = useState<EventTagItem[]>([]);
+
+    const [calendarFilterModalVisible, setCalendarFilterModalVisible] = useState(false);
+    const [eventTagFilterModalVisible, setEventTagFilterModalVisible] = useState(false);
+
+    const [selectedCalendarCategoryIds, setSelectedCalendarCategoryIds] = useState<number[]>([]);
+    const [selectedEventTagIds, setSelectedEventTagIds] = useState<number[]>([]);
+    const [selectedTagCategoryId, setSelectedTagCategoryId] = useState<number | null>(null);
+
+    const { results: userResults } = useUserSearch(query);
+    const { results: calendars } = useCalendarSearch(query);
+    const { results: events } = useEventSearch(query);
+    const { followUser: followUserRequest } = useFollowUserAction();
+    const { data: adsConfig } = useAdsConfig();
+    const { addEntry, history, patchUserPhotos } = useSearchHistory();
+
+    useEffect(() => {
+        setUsers(userResults);
+        if (userResults.length > 0) {
+            patchUserPhotos(userResults.map(u => ({ username: u.username, photo: u.photo ?? null })));
+        }
+    }, [userResults]);
+
+    useEffect(() => {
+        if (!query.trim()) setActiveTab('all');
+    }, [query]);
+
+    useEffect(() => {
+        const loadFiltersData = async () => {
+            try {
+                const [categoriesResponse, tagsResponse] = await Promise.all([
+                    apiClient.get("/categories/"),
+                    apiClient.get("/event-tags/"),
+                ]);
+
+                const loadedCategories =
+                    (Array.isArray(categoriesResponse) && categoriesResponse) ||
+                    (Array.isArray((categoriesResponse as any)?.results) && (categoriesResponse as any).results) ||
+                    (Array.isArray((categoriesResponse as any)?.data) && (categoriesResponse as any).data) ||
+                    [];
+
+                const loadedTags =
+                    (Array.isArray(tagsResponse) && tagsResponse) ||
+                    (Array.isArray((tagsResponse as any)?.results) && (tagsResponse as any).results) ||
+                    (Array.isArray((tagsResponse as any)?.data) && (tagsResponse as any).data) ||
+                    [];
+
+                setCategories(loadedCategories);
+                setEventTags(loadedTags);
+            } catch (error) {
+                console.error("Error loading search filters:", error);
+                setCategories([]);
+                setEventTags([]);
+            }
+        };
+
+        void loadFiltersData();
+    }, []);
+
+    const allResults: SearchResult[] = useMemo(() => {
+        if (!query.trim()) return history as SearchResult[];
+
+        const usersRes: SearchResult[] = users.map((u) => ({ type: 'user', data: u }));
+        const calRes: SearchResult[] = calendars.map((c) => ({ type: 'calendar', data: c }));
+        const eventRes: SearchResult[] = events.map((e) => ({ type: 'event', data: e }));
+
+        return [...usersRes, ...calRes, ...eventRes];
+    }, [query, users, calendars, events, history]);
+
+    const visibleEventTags = useMemo(() => {
+        if (!selectedTagCategoryId) return [];
+        return eventTags.filter((tag) => Number(tag.category) === Number(selectedTagCategoryId));
+    }, [eventTags, selectedTagCategoryId]);
+
+    const filtered: SearchResult[] = useMemo(() => {
+        let baseResults =
+            activeTab === 'all'
+                ? allResults
+                : allResults.filter((item) => {
+                    if (activeTab === 'calendars') return item.type === 'calendar';
+                    if (activeTab === 'events') return item.type === 'event';
+                    if (activeTab === 'users') return item.type === 'user';
+                    return true;
+                });
+
+        if (activeTab === 'calendars' && selectedCalendarCategoryIds.length > 0) {
+            baseResults = baseResults.filter((item) => {
+                if (item.type !== 'calendar') return false;
+
+                const calendarCategoryIds = Array.isArray(item.data?.categories)
+                    ? item.data.categories.map((c: any) => Number(c.id))
+                    : [];
+
+                return selectedCalendarCategoryIds.every((categoryId) =>
+                    calendarCategoryIds.includes(categoryId)
+                );
+            });
+        }
+
+        if (activeTab === 'events' && selectedEventTagIds.length > 0) {
+            baseResults = baseResults.filter((item) => {
+                if (item.type !== 'event') return false;
+
+                const eventTagIds = Array.isArray(item.data?.tags)
+                    ? item.data.tags.map((tag: any) => Number(tag.id))
+                    : [];
+
+                return selectedEventTagIds.every((tagId) => eventTagIds.includes(tagId));
+            });
+        }
+
+        return baseResults;
+    }, [activeTab, allResults, selectedCalendarCategoryIds, selectedEventTagIds]);
+
+    const toggleCalendarCategory = (categoryId: number) => {
+        setSelectedCalendarCategoryIds((prev) =>
+            prev.includes(categoryId)
+                ? prev.filter((id) => id !== categoryId)
+                : [...prev, categoryId]
+        );
+    };
+
+    const toggleEventTag = (tagId: number) => {
+        setSelectedEventTagIds((prev) =>
+            prev.includes(tagId)
+                ? prev.filter((id) => id !== tagId)
+                : [...prev, tagId]
+        );
+    };
+
+    const followUser = async (id: string | number) => {
+        const normalizedId = String(id);
+        setLoadingId(normalizedId);
+
+        if (USE_MOCK) {
+            setUsers(prev =>
+                prev.map(u => String(u.id) === normalizedId ? { ...u, followed: !u.followed } : u)
+            );
+            setLoadingId(null);
+            return;
+        }
+
+        try {
+            const data = await followUserRequest(normalizedId);
+            setUsers(prev =>
+                prev.map(u =>
+                    String(u.id) === normalizedId ? { ...u, followed: data.followed } : u
+                )
+            );
+        } catch (error) {
+            console.error(error);
+        } finally {
+            setLoadingId(null);
+        }
+    };
+
+    const handleUserSelect = (user: any) => {
+        addEntry({ type: 'user', data: user, timestamp: Date.now() });
+        router.push(`/profile/${user.username}`);
+    };
+
+    const handleCalendarSelect = (cal: any) => {
+        addEntry({ type: 'calendar', data: cal, timestamp: Date.now() });
+        router.push(`/calendar-view?calendarId=${cal.id}`);
+    };
+
+    const handleEventSelect = (event: CalendarEvent | any) => {
+        addEntry({ type: 'event', data: event, timestamp: Date.now() })
+        setActiveEvent(event);
+        const calendarId = event.calendarId || (Array.isArray(event.calendars) ? String(event.calendars[0]) : null);
+        if (calendarId) {
+            router.push(`/calendar-view?calendarId=${calendarId}`);
+            return;
+        }
+        router.push(`/switch-events`);
+    };
+
+    const showTabs = query.trim().length > 0 || history.length > 0;
+
+    const getEmptyMessage = () => {
+        if (activeTab === 'all') return 'No results found';
+        if (activeTab === 'calendars') return 'No calendars found';
+        if (activeTab === 'events') return 'No events found';
+        if (activeTab === 'users') return 'No users found';
+        return 'No results found';
+    };
+
+    const listData = adsConfig?.show_ads && filtered.length > 0
+        ? injectAds(filtered, adsConfig.frequency)
+        : filtered;
+
+    return (
+        <View style={styles.container}>
+            <View style={styles.searchContainer}>
+                <Ionicons name="search" size={20} color="#888" />
+                <TextInput
+                    placeholder='Search users, calendars, events...'
+                    value={query}
+                    onChangeText={setQuery}
+                    style={styles.input}
+                    testID="search-input"
+                />
+            </View>
+
+            {showTabs && (
+                <View style={styles.tabStrip}>
+                    {TAB_OPTIONS.map((tab) => {
+                        const isActive = activeTab === tab.type;
+                        return (
+                            <TouchableOpacity
+                                key={tab.type}
+                                onPress={() => setActiveTab(tab.type)}
+                                style={[
+                                    styles.tabChip,
+                                    isActive ? styles.tabChipActive : styles.tabChipInactive,
+                                ]}
+                                activeOpacity={0.7}
+                                testID={`search-tab-${tab.type}`}
+                            >
+                                <Ionicons
+                                    name={tab.icon}
+                                    size={16}
+                                    color={isActive ? '#fff' : '#10464d'}
+                                />
+                                <Text style={[styles.tabLabel, { color: isActive ? '#fff' : '#333' }]}>
+                                    {tab.label}
+                                </Text>
+                            </TouchableOpacity>
+                        );
+                    })}
+                </View>
+            )}
+
+            {activeTab === 'calendars' && (
+                <View style={styles.filterActionRow}>
+                    <TouchableOpacity
+                        style={styles.filterActionButton}
+                        onPress={() => setCalendarFilterModalVisible(true)}
+                        activeOpacity={0.8}
+                    >
+                        <Ionicons name="funnel-outline" size={16} color="#10464d" />
+                        <Text style={styles.filterActionButtonText}>Filter by Category</Text>
+                        {!!selectedCalendarCategoryIds.length && (
+                            <View style={styles.filterCountBadge}>
+                                <Text style={styles.filterCountBadgeText}>
+                                    {selectedCalendarCategoryIds.length}
+                                </Text>
+                            </View>
+                        )}
+                    </TouchableOpacity>
+                </View>
+            )}
+
+            {activeTab === 'events' && (
+                <View style={styles.filterActionRow}>
+                    <TouchableOpacity
+                        style={styles.filterActionButton}
+                        onPress={() => setEventTagFilterModalVisible(true)}
+                        activeOpacity={0.8}
+                    >
+                        <Ionicons name="funnel-outline" size={16} color="#10464d" />
+                        <Text style={styles.filterActionButtonText}>Filter by Event Tag</Text>
+                        {!!selectedEventTagIds.length && (
+                            <View style={styles.filterCountBadge}>
+                                <Text style={styles.filterCountBadgeText}>
+                                    {selectedEventTagIds.length}
+                                </Text>
+                            </View>
+                        )}
+                    </TouchableOpacity>
+                </View>
+            )}
+
+            <FlatList
+                style={styles.list}
+                contentContainerStyle={styles.listContent}
+                data={listData}
+                keyExtractor={(item: any) => {
+                    if (isAdItem(item)) return item.id;
+                    const id = item.data.id ?? item.data.calendarId ?? item.data.username;
+                    return `${item.type}-${id}`;
+                }}
+                ListEmptyComponent={
+                    showTabs ? (
+                        <View style={styles.emptyContainer}>
+                            <Text style={styles.emptyText}>{getEmptyMessage()}</Text>
+                        </View>
+                    ) : null
+                }
+                renderItem={({ item }: any) => {
+                    if (isAdItem(item)) return <AdCard placement="search" />;
+
+                    if (item.type === 'user') {
+                        const user = item.data;
+                        return (
+                            <TouchableOpacity
+                                style={styles.card}
+                                onPress={() => handleUserSelect(user)}
+                                testID={`search-user-card-${user.username}`}
+                            >
+                                <Image
+                                    source={
+                                        user.photo && user.photo.trim() !== ""
+                                            ? { uri: user.photo }
+                                            : require('../../assets/images/default-user.jpg')
+                                    }
+                                    style={[styles.leftImage, styles.roundedFull]}
+                                />
+                                <View style={styles.middleInfo}>
+                                    <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">{user.username}</Text>
+                                    <Text style={styles.subText} numberOfLines={2} ellipsizeMode="tail">{user.bio}</Text>
+                                </View>
+                                {(!currentUser || user.username !== currentUser.username) && (
+                                    <Pressable
+                                        style={[styles.followButton, user.followed && styles.followingButton]}
+                                        onPress={(event) => {
+                                            event.stopPropagation();
+                                            followUser(user.id);
+                                        }}
+                                        testID={`search-follow-button-${user.username}`}
+                                    >
+                                        <Text style={[styles.followText, user.followed && styles.followingText]}>
+                                            {loadingId === String(user.id) ? "..." : user.followed ? "Following" : "Follow"}
+                                        </Text>
+                                    </Pressable>
+                                )}
+                            </TouchableOpacity>
+                        );
+                    }
+
+                    if (item.type === 'calendar') {
+                        const cal = item.data;
+                        const description = normalizeText(cal.description);
+                        const descriptionSnippet = buildDescriptionSnippet(description, query);
+                        const calendarColor = cal.color || "#10464d";
+
+                        return (
+                            <TouchableOpacity
+                                style={styles.card}
+                                onPress={() => handleCalendarSelect(cal)}
+                                testID={`search-calendar-card-${cal.id}`}
+                            >
+                                {cal.cover ? (
+                                    <Image source={{ uri: cal.cover }} style={styles.leftImage} />
+                                ) : (
+                                    <View style={[styles.leftImage, styles.placeholderIcon, { backgroundColor: `${calendarColor}20` }]}>
+                                        <Ionicons name="calendar" size={24} color={calendarColor} />
+                                    </View>
+                                )}
+                                <View style={styles.middleInfo}>
+                                    <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">{cal.name}</Text>
+                                    {!!descriptionSnippet && (
+                                        <View>
+                                            {renderHighlightedText(descriptionSnippet, query, styles.subText, styles.highlightText)}
+                                        </View>
+                                    )}
+                                </View>
+                                {cal.creator_username && (
+                                    <View style={styles.rightMeta}>
+                                        <Ionicons name="person-circle-outline" size={16} color="#666" />
+                                        <Text style={styles.rightMetaText} numberOfLines={1} ellipsizeMode="tail">
+                                            {cal.creator_username}
+                                        </Text>
+                                    </View>
+                                )}
+                            </TouchableOpacity>
+                        );
+                    }
+
+                    const ev = item.data;
+                    const eventDescription = normalizeText(ev.description);
+                    const eventDescriptionSnippet = buildDescriptionSnippet(eventDescription, query);
+
+                    return (
+                        <TouchableOpacity
+                            style={styles.card}
+                            onPress={() => handleEventSelect(ev)}
+                            testID={`search-event-card-${ev.id}`}
+                        >
+                            {ev.photo ? (
+                                <Image source={{ uri: ev.photo }} style={styles.leftImage} />
+                            ) : (
+                                <View style={[styles.leftImage, styles.placeholderIcon, { backgroundColor: '#f0f0f0' }]}>
+                                    <Ionicons name="flag" size={24} color="#a0a0a0" />
+                                </View>
+                            )}
+                            <View style={styles.middleInfo}>
+                                <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">{ev.title}</Text>
+                                <Text style={styles.subText} numberOfLines={1} ellipsizeMode="tail">
+                                    {ev.date} {ev.time}
+                                </Text>
+                                {!!eventDescriptionSnippet && (
+                                    <View>
+                                        {renderHighlightedText(eventDescriptionSnippet, query, styles.subText, styles.highlightText)}
+                                    </View>
+                                )}
+                            </View>
+                            {ev.creator_username && (
+                                <View style={styles.rightMeta}>
+                                    <Ionicons name="person-circle-outline" size={16} color="#666" />
+                                    <Text style={styles.rightMetaText} numberOfLines={1} ellipsizeMode="tail">
+                                        {ev.creator_username}
+                                    </Text>
+                                </View>
+                            )}
+                        </TouchableOpacity>
+                    );
+                }}
+            />
+
+            <Modal
+                visible={calendarFilterModalVisible}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setCalendarFilterModalVisible(false)}
+            >
+                <View style={styles.modalOverlay}>
+                    <View style={styles.filterModalCard}>
+                        <View style={styles.filterModalHeader}>
+                            <Text style={styles.filterModalTitle}>Filter calendars by category</Text>
+                            <Pressable onPress={() => setCalendarFilterModalVisible(false)}>
+                                <Ionicons name="close" size={20} color="#10464d" />
+                            </Pressable>
+                        </View>
+
+                        <FlatList
+                            data={categories}
+                            keyExtractor={(item) => String(item.id)}
+                            contentContainerStyle={styles.filterOptionsWrap}
+                            renderItem={({ item }) => {
+                                const selected = selectedCalendarCategoryIds.includes(item.id);
+                                return (
+                                    <Pressable
+                                        style={[
+                                            styles.filterChip,
+                                            selected && styles.filterChipSelected,
+                                        ]}
+                                        onPress={() => toggleCalendarCategory(item.id)}
+                                    >
+                                        <Text
+                                            style={[
+                                                styles.filterChipText,
+                                                selected && styles.filterChipTextSelected,
+                                            ]}
+                                        >
+                                            {item.name}
+                                        </Text>
+                                    </Pressable>
+                                );
+                            }}
+                        />
+
+                        <View style={styles.filterModalActions}>
+                            <TouchableOpacity
+                                style={styles.filterSecondaryButton}
+                                onPress={() => setSelectedCalendarCategoryIds([])}
+                            >
+                                <Text style={styles.filterSecondaryButtonText}>Clear</Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                                style={styles.filterPrimaryButton}
+                                onPress={() => setCalendarFilterModalVisible(false)}
+                            >
+                                <Text style={styles.filterPrimaryButtonText}>Apply</Text>
+                            </TouchableOpacity>
+                        </View>
+                    </View>
+                </View>
+            </Modal>
+
+            <Modal
+                visible={eventTagFilterModalVisible}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setEventTagFilterModalVisible(false)}
+            >
+                <View style={styles.modalOverlay}>
+                    <View style={styles.filterModalCardLarge}>
+                        <View style={styles.filterModalHeader}>
+                            <Text style={styles.filterModalTitle}>Filter events by tag</Text>
+                            <Pressable onPress={() => setEventTagFilterModalVisible(false)}>
+                                <Ionicons name="close" size={20} color="#10464d" />
+                            </Pressable>
+                        </View>
+
+                        <Text style={styles.filterSectionTitle}>Categories</Text>
+                        <FlatList
+                            data={categories}
+                            horizontal
+                            showsHorizontalScrollIndicator={false}
+                            keyExtractor={(item) => String(item.id)}
+                            contentContainerStyle={styles.horizontalCategoriesWrap}
+                            renderItem={({ item }) => {
+                                const selected = selectedTagCategoryId === item.id;
+                                return (
+                                    <Pressable
+                                        style={[
+                                            styles.filterChip,
+                                            selected && styles.filterChipSelected,
+                                        ]}
+                                        onPress={() => setSelectedTagCategoryId(item.id)}
+                                    >
+                                        <Text
+                                            style={[
+                                                styles.filterChipText,
+                                                selected && styles.filterChipTextSelected,
+                                            ]}
+                                        >
+                                            {item.name}
+                                        </Text>
+                                    </Pressable>
+                                );
+                            }}
+                        />
+
+                        <Text style={styles.filterSectionTitle}>Event tags</Text>
+                        <FlatList
+                            data={visibleEventTags}
+                            keyExtractor={(item) => String(item.id)}
+                            contentContainerStyle={styles.filterOptionsWrap}
+                            ListEmptyComponent={
+                                <Text style={styles.emptyTagsText}>
+                                    Select a category to see its event tags.
+                                </Text>
+                            }
+                            renderItem={({ item }) => {
+                                const selected = selectedEventTagIds.includes(item.id);
+                                return (
+                                    <Pressable
+                                        style={[
+                                            styles.filterChip,
+                                            selected && styles.filterChipSelected,
+                                        ]}
+                                        onPress={() => toggleEventTag(item.id)}
+                                    >
+                                        <Text
+                                            style={[
+                                                styles.filterChipText,
+                                                selected && styles.filterChipTextSelected,
+                                            ]}
+                                        >
+                                            {item.name}
+                                        </Text>
+                                    </Pressable>
+                                );
+                            }}
+                        />
+
+                        <View style={styles.filterModalActions}>
+                            <TouchableOpacity
+                                style={styles.filterSecondaryButton}
+                                onPress={() => {
+                                    setSelectedTagCategoryId(null);
+                                    setSelectedEventTagIds([]);
+                                }}
+                            >
+                                <Text style={styles.filterSecondaryButtonText}>Clear</Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                                style={styles.filterPrimaryButton}
+                                onPress={() => setEventTagFilterModalVisible(false)}
+                            >
+                                <Text style={styles.filterPrimaryButtonText}>Apply</Text>
+                            </TouchableOpacity>
+                        </View>
+                    </View>
+                </View>
+            </Modal>
+
+            <PublicEventDetailModal event={activeEvent} onClose={() => setActiveEvent(null)} />
+        </View>
+    );
+}
+
+const styles = StyleSheet.create({
+    container: {
+        flex: 1,
+        padding: 16,
+    },
+    searchContainer: {
+        flexDirection: "row",
+        alignItems: "center",
+        backgroundColor: "#fff",
+        borderRadius: 25,
+        paddingHorizontal: 15,
+        paddingVertical: 10,
+        marginBottom: 20,
+        gap: 8,
+    },
+    input: {
+        flex: 1,
+    },
+    tabStrip: {
+        flexDirection: 'row',
+        justifyContent: 'center',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        marginBottom: 12,
+        gap: 10,
+    },
+    tabChip: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 16,
+        paddingVertical: 10,
+        borderRadius: 20,
+        gap: 6,
+    },
+    tabChipActive: {
+        backgroundColor: '#10464d',
+        shadowColor: '#10464d',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.25,
+        shadowRadius: 4,
+        elevation: 3,
+    },
+    tabChipInactive: {
+        backgroundColor: '#fff',
+        borderWidth: 1,
+        borderColor: 'rgba(16,70,77,0.2)',
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.1,
+        shadowRadius: 2,
+        elevation: 1,
+    },
+    tabLabel: {
+        fontSize: 14,
+        fontWeight: '600',
+    },
+    filterActionRow: {
+        flexDirection: "row",
+        justifyContent: "flex-start",
+        marginBottom: 14,
+    },
+    filterActionButton: {
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 8,
+        backgroundColor: "#fff",
+        borderWidth: 1,
+        borderColor: "rgba(16,70,77,0.2)",
+        borderRadius: 20,
+        paddingHorizontal: 14,
+        paddingVertical: 10,
+    },
+    filterActionButtonText: {
+        fontSize: 14,
+        fontWeight: "600",
+        color: "#10464d",
+    },
+    filterCountBadge: {
+        minWidth: 20,
+        height: 20,
+        borderRadius: 10,
+        backgroundColor: "#10464d",
+        alignItems: "center",
+        justifyContent: "center",
+        paddingHorizontal: 6,
+    },
+    filterCountBadgeText: {
+        color: "#fff",
+        fontSize: 11,
+        fontWeight: "700",
+    },
+    list: {
+        flex: 1,
+    },
+    listContent: {
+        flexGrow: 1,
+        justifyContent: 'flex-start',
+        paddingBottom: 20,
+    },
+    emptyContainer: {
+        paddingVertical: 40,
+        alignItems: 'center',
+    },
+    emptyText: {
+        fontSize: 15,
+        color: '#888',
+        fontStyle: 'italic',
+    },
+    card: {
+        borderColor: "#10464d",
+        backgroundColor: "white",
+        borderWidth: 2,
+        borderRadius: 12,
+        padding: 12,
+        marginBottom: 16,
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 12,
+    },
+    leftImage: {
+        width: 70,
+        height: 70,
+        borderRadius: 8,
+    },
+    roundedFull: {
+        borderRadius: 25,
+    },
+    placeholderIcon: {
+        justifyContent: "center",
+        alignItems: "center",
+    },
+    middleInfo: {
+        flex: 1,
+        flexDirection: "column",
+        justifyContent: "center",
+    },
+    title: {
+        fontWeight: "bold",
+        fontSize: 15,
+        color: "#1a1a1a",
+    },
+    subText: {
+        fontSize: 12,
+        color: "#666",
+        marginTop: 2,
+    },
+    rightMeta: {
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 4,
+        maxWidth: 90,
+        marginRight: 4,
+    },
+    rightMetaText: {
+        fontSize: 12,
+        color: "#10464d",
+        fontWeight: "600",
+        flexShrink: 1,
+    },
+    followButton: {
+        backgroundColor: "#eb8c85",
+        paddingHorizontal: 16,
+        paddingVertical: 6,
+        borderRadius: 20,
+        marginLeft: 'auto',
+    },
+    followingButton: {
+        backgroundColor: "#10464d",
+    },
+    followText: {
+        color: "#fff",
+        fontWeight: "600",
+        fontSize: 13,
+    },
+    followingText: {
+        color: "#fff",
+    },
+    highlightText: {
+        color: "#10464d",
+        fontWeight: "700",
+    },
+    modalOverlay: {
+        flex: 1,
+        backgroundColor: "rgba(0,0,0,0.35)",
+        justifyContent: "center",
+        alignItems: "center",
+        padding: 20,
+    },
+    filterModalCard: {
+        width: "100%",
+        maxWidth: 460,
+        backgroundColor: "#fff",
+        borderRadius: 16,
+        padding: 16,
+        maxHeight: "75%",
+    },
+    filterModalCardLarge: {
+        width: "100%",
+        maxWidth: 560,
+        backgroundColor: "#fff",
+        borderRadius: 16,
+        padding: 16,
+        maxHeight: "80%",
+    },
+    filterModalHeader: {
+        flexDirection: "row",
+        justifyContent: "space-between",
+        alignItems: "center",
+        marginBottom: 14,
+    },
+    filterModalTitle: {
+        fontSize: 17,
+        fontWeight: "700",
+        color: "#10464d",
+    },
+    filterSectionTitle: {
+        fontSize: 14,
+        fontWeight: "700",
+        color: "#10464d",
+        marginTop: 8,
+        marginBottom: 10,
+    },
+    horizontalCategoriesWrap: {
+        paddingBottom: 6,
+        gap: 8,
+    },
+    filterOptionsWrap: {
+        flexDirection: "row",
+        flexWrap: "wrap",
+        gap: 10,
+        paddingBottom: 8,
+    },
+    filterChip: {
+        paddingHorizontal: 14,
+        paddingVertical: 10,
+        borderRadius: 999,
+        backgroundColor: "#f7fbfb",
+        borderWidth: 1,
+        borderColor: "#d8e6e7",
+    },
+    filterChipSelected: {
+        backgroundColor: "#10464d",
+        borderColor: "#10464d",
+    },
+    filterChipText: {
+        color: "#10464d",
+        fontSize: 13,
+        fontWeight: "600",
+    },
+    filterChipTextSelected: {
+        color: "#fff",
+    },
+    filterModalActions: {
+        flexDirection: "row",
+        justifyContent: "flex-end",
+        gap: 10,
+        marginTop: 18,
+    },
+    filterSecondaryButton: {
+        paddingHorizontal: 16,
+        paddingVertical: 10,
+        borderRadius: 12,
+        backgroundColor: "#f2f2f2",
+    },
+    filterSecondaryButtonText: {
+        color: "#333",
+        fontWeight: "600",
+    },
+    filterPrimaryButton: {
+        paddingHorizontal: 16,
+        paddingVertical: 10,
+        borderRadius: 12,
+        backgroundColor: "#10464d",
+    },
+    filterPrimaryButtonText: {
+        color: "#fff",
+        fontWeight: "700",
+    },
+    emptyTagsText: {
+        color: "#777",
+        fontSize: 13,
+        fontStyle: "italic",
+        marginTop: 6,
+    },
+});

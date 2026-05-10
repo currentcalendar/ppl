@@ -1,0 +1,63 @@
+// ─── Domain Types (mirrors backend/main/models.py) ─────────────────────────
+
+export type PrivacyStatus = 'PRIVATE' | 'PUBLIC';
+
+export type CalendarOrigin = 'CURRENT' | 'GOOGLE' | 'APPLE';
+
+export type EventType = 'meeting' | 'task' | 'reminder' | 'holiday' | 'birthday' | 'other';
+
+export type CalendarCategory = {
+  id: number;
+  name: string;
+};
+
+export interface Calendar {
+    id: string;
+    name: string;
+    description: string;
+    cover?: string;         // URL to cover image
+    privacy: PrivacyStatus;
+    origin: CalendarOrigin;
+    creator: string;        // username
+    color: string;          // UI-only accent color
+    likes_count?: number;
+    liked_by_me?: boolean;
+    co_owners?: { id: number, username: string }[]; // For shared calendars
+    viewers?: { id?: number; username: string }[];
+    categories?: CalendarCategory[];
+}
+
+export interface CalendarEvent {
+    id: string;
+    calendarId: string;
+    title: string;
+    description: string;
+    place_name: string;
+    location?: { latitude: number; longitude: number } | null;
+    date: string;           // YYYY-MM-DD (start date)
+    end_date?: string;      // YYYY-MM-DD (end date, optional)
+    time: string;           // HH:mm
+    end_time?: string;      // HH:mm (end time, optional)
+    photo?: string;         // URL to event image
+    recurrence?: string | null;
+    type?: EventType;       // UI-only filter type (TODO BACKEND mapping)
+    color?: string;         // UI-only, inherited from calendar
+    attendees?: {
+        id: string;
+        name: string;
+        respondedAt: string;
+        avatar?: string;
+    }[];
+    my_attendance_status?: 'ASSISTING' | 'NOT_ASSISTING' | 'PENDING' | null;
+    show_time: boolean;
+}
+
+// ─── API Response shapes (to be connected to backend) ─────────────────────────
+
+export interface CalendarsResponse {
+    calendars: Calendar[];
+}
+
+export interface EventsResponse {
+    events: CalendarEvent[];
+}
